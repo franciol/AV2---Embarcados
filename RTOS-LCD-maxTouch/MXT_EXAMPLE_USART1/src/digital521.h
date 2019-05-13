@@ -25,15 +25,18 @@
 *******************************************************************************/
 
 /*
- typedef struct {
-     long int code;
-     const tImage *image;
-     } tChar;
- typedef struct {
-     int length;
-     const tChar *chars;
-     } tFont;
+
+typedef struct {
+    long int code;
+    const tImage *image;
+    } tChar;
+typedef struct {
+    int length;
+    const tChar *chars;
+    } tFont;
+
 */
+
 
 #include <stdint.h>
 
