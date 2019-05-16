@@ -97,35 +97,48 @@
 #include "soneca.h"
 #include "digital521.h"
 
+
+
+/************************************************************************/
+/* VOLATILES                                                            */
+/************************************************************************/
+volatile uint32_t g_ul_value = 0;
+
+
+/************************************************************************/
+/* DEFINES                                                              */
+/************************************************************************/
+
+/* Botao 1 OLED */
+#define BUT1_PIO			PIOD
+#define BUT1_PIO_ID			ID_PIOD
+#define BUT1_PIO_IDX		28u
+#define BUT1_PIO_IDX_MASK	(1u << BUT1_PIO_IDX)
+
+/* Botao 3 OLED */
+#define BUT3_PIO			PIOA
+#define BUT3_PIO_ID			ID_PIOA
+#define BUT3_PIO_IDX		19u
+#define BUT3_PIO_IDX_MASK	(1u << BUT3_PIO_IDX)
+
 /* Canal do sensor de temperatura */
-#define AFEC_CHANNEL_TEMP_SENSOR 11
+#define AFEC_CHANNEL_TEMP_SENSOR 1
 
-/************************************************************************/
-/* Semaphores                                                           */
-/************************************************************************/
-SemaphoreHandle_t xSemaphoreTemp;
+/** Reference voltage for AFEC,in mv. */
+#define VOLT_REF        (3300)
 
-
-/************************************************************************/
-/* Callbacks                                                            */
-/************************************************************************/
-
-static void AFEC_Temp_callback(void)
-{
-	uint32_t g_ul_value = afec_channel_get_value(AFEC0, AFEC_CHANNEL_TEMP_SENSOR);
-	printf("%d C\n",g_ul_value);
-	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-	xSemaphoreGiveFromISR(xSemaphoreTemp , &xHigherPriorityTaskWoken);
-}
+/** The maximal digital value */
+/** 2^12 - 1                  */
+#define MAX_DIGITAL (4095)
 
 
-/************************************************************************/
-/* Defines                                                              */
-/************************************************************************/
 
 #define PIO_PWM_0 PIOA
 #define ID_PIO_PWM_0 ID_PIOA
 #define MASK_PIN_PWM_0 (1 << 0)
+
+/** PWM channel instance for LEDs */
+pwm_channel_t g_pwm_channel_led;
 
 /** PWM frequency in Hz */
 #define PWM_FREQUENCY      1000
@@ -134,22 +147,17 @@ static void AFEC_Temp_callback(void)
 /** Initial duty cycle value */
 #define INIT_DUTY_VALUE    0
 
-pwm_channel_t g_pwm_channel_led;
 
 
-/** Reference voltage for AFEC,in mv. */
-#define VOLT_REF        (3300)
-
-/** The maximal digital value */
-/** 2^12 - 1                  */
-#define MAX_DIGITAL     (4095)
+/************************************************************************/
+/* SEMAPHORES                                                           */
+/************************************************************************/
+SemaphoreHandle_t xSemaphoreTemp,xSemaphoreButUp,xSemaphoreButDown;
 
 /************************************************************************/
 /* LCD + TOUCH                                                          */
 /************************************************************************/
 #define MAX_ENTRIES        3
-
-
 
 struct ili9488_opt_t g_ili9488_display_opt;
 const uint32_t BUTTON_W = 120;
@@ -167,10 +175,8 @@ const uint32_t BUTTON_Y = ILI9488_LCD_HEIGHT/2;
 #define TASK_LCD_STACK_SIZE            (2*1024/sizeof(portSTACK_TYPE))
 #define TASK_LCD_STACK_PRIORITY        (tskIDLE_PRIORITY)
 
-#define TASK_TEMP_STACK_SIZE            (2*1024/sizeof(portSTACK_TYPE))
-#define TASK_TEMP_STACK_PRIORITY        (tskIDLE_PRIORITY)
-
-
+#define TASK_AFEC_STACK_SIZE            (2*1024/sizeof(portSTACK_TYPE))
+#define TASK_AFEC_STACK_PRIORITY        (tskIDLE_PRIORITY)
 
 typedef struct {
   uint x;
@@ -178,8 +184,7 @@ typedef struct {
 } touchData;
 
 QueueHandle_t xQueueTouch;
-QueueHandle_t xQueueTemp;
-
+QueueHandle_t xQueueTemps,xQueuePercs;
 
 /************************************************************************/
 /* RTOS hooks                                                           */
@@ -227,6 +232,29 @@ extern void vApplicationMallocFailedHook(void)
 }
 
 /************************************************************************/
+/* CALLBACKS                                                            */
+/************************************************************************/
+static void AFEC_Temp_callback(void)
+{
+	g_ul_value = (afec_channel_get_value(AFEC1, AFEC_CHANNEL_TEMP_SENSOR));
+	printf("%d C\n",g_ul_value);
+	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+	xSemaphoreGiveFromISR(xSemaphoreTemp , &xHigherPriorityTaskWoken);
+}
+
+static void but1_callback(void){
+	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+	xSemaphoreGiveFromISR(xSemaphoreButDown, &xHigherPriorityTaskWoken);
+}
+
+static void but3_callback(void){
+	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+	xSemaphoreGiveFromISR(xSemaphoreButUp, &xHigherPriorityTaskWoken);
+}
+
+
+
+/************************************************************************/
 /* init                                                                 */
 /************************************************************************/
 void PWM0_init(uint channel, uint duty){
@@ -261,6 +289,46 @@ void PWM0_init(uint channel, uint duty){
 	
 	/* Enable PWM channels for LEDs */
 	pwm_channel_enable(PWM0, channel);
+}
+
+
+void io_init(void)
+{
+
+	pmc_enable_periph_clk(BUT1_PIO_ID);
+	pmc_enable_periph_clk(BUT3_PIO_ID);
+
+	pio_configure(BUT1_PIO, PIO_INPUT, BUT1_PIO_IDX_MASK, PIO_PULLUP);
+	pio_configure(BUT3_PIO, PIO_INPUT, BUT3_PIO_IDX_MASK, PIO_PULLUP);
+
+	// Configura interrupção no pino referente ao botao e associa
+	// função de callback caso uma interrupção for gerada
+	// a função de callback é a: but_callback()
+	pio_handler_set(BUT1_PIO,
+	BUT1_PIO_ID,
+	BUT1_PIO_IDX_MASK,
+	PIO_IT_FALL_EDGE,
+	but1_callback);
+	
+	pio_handler_set(BUT3_PIO,
+	BUT3_PIO_ID,
+	BUT3_PIO_IDX_MASK,
+	PIO_IT_FALL_EDGE,
+	but3_callback);
+
+	
+	
+	// Configura NVIC para receber interrupcoes do PIO do botao
+	// com prioridade 4 (quanto mais próximo de 0 maior)
+	NVIC_EnableIRQ(BUT1_PIO_ID);
+	NVIC_SetPriority(BUT1_PIO_ID, 5);
+	NVIC_EnableIRQ(BUT3_PIO_ID);
+	NVIC_SetPriority(BUT3_PIO_ID, 5); // Prioridade 5
+	
+	
+	// Ativa interrupção
+	pio_enable_interrupt(BUT1_PIO, BUT1_PIO_IDX_MASK);
+	pio_enable_interrupt(BUT3_PIO, BUT3_PIO_IDX_MASK);
 }
 
 static void configure_lcd(void){
@@ -366,6 +434,7 @@ static void mxt_init(struct mxt_device *device)
 			MXT_GEN_COMMANDPROCESSOR_T6, 0)
 			+ MXT_GEN_COMMANDPROCESSOR_CALIBRATE, 0x01);
 }
+
 void font_draw_text(tFont *font, const char *text, int x, int y, int spacing) {
 	char *p = text;
 	while(*p != NULL) {
@@ -379,6 +448,7 @@ void font_draw_text(tFont *font, const char *text, int x, int y, int spacing) {
 		p++;
 	}
 }
+
 
 /************************************************************************/
 /* funcoes                                                              */
@@ -405,8 +475,8 @@ static void config_ADC_TEMP(void){
 /*************************************
    * Ativa e configura AFEC
    *************************************/
-  /* Ativa AFEC - 0 */
-	afec_enable(AFEC0);
+  /* Ativa AFEC - 1 */
+	afec_enable(AFEC1);
 
 	/* struct de configuracao do AFEC */
 	struct afec_config afec_cfg;
@@ -415,19 +485,19 @@ static void config_ADC_TEMP(void){
 	afec_get_config_defaults(&afec_cfg);
 
 	/* Configura AFEC */
-	afec_init(AFEC0, &afec_cfg);
+	afec_init(AFEC1, &afec_cfg);
 
 	/* Configura trigger por software */
-	afec_set_trigger(AFEC0, AFEC_TRIG_SW);
+	afec_set_trigger(AFEC1, AFEC_TRIG_SW);
 
 	/* configura call back */
-	afec_set_callback(AFEC0, AFEC_INTERRUPT_EOC_11,	AFEC_Temp_callback, 1);
+	afec_set_callback(AFEC1, AFEC_INTERRUPT_EOC_1,	AFEC_Temp_callback, 5);
 
 	/*** Configuracao espec?fica do canal AFEC ***/
 	struct afec_ch_config afec_ch_cfg;
 	afec_ch_get_config_defaults(&afec_ch_cfg);
 	afec_ch_cfg.gain = AFEC_GAINVALUE_0;
-	afec_ch_set_config(AFEC0, AFEC_CHANNEL_TEMP_SENSOR, &afec_ch_cfg);
+	afec_ch_set_config(AFEC1, AFEC_CHANNEL_TEMP_SENSOR, &afec_ch_cfg);
 
 	/*
 	* Calibracao:
@@ -440,10 +510,10 @@ static void config_ADC_TEMP(void){
 	struct afec_temp_sensor_config afec_temp_sensor_cfg;
 
 	afec_temp_sensor_get_config_defaults(&afec_temp_sensor_cfg);
-	afec_temp_sensor_set_config(AFEC0, &afec_temp_sensor_cfg);
+	afec_temp_sensor_set_config(AFEC1, &afec_temp_sensor_cfg);
 
 	/* Selecina canal e inicializa convers?o */
-	afec_channel_enable(AFEC0, AFEC_CHANNEL_TEMP_SENSOR);
+	afec_channel_enable(AFEC1, AFEC_CHANNEL_TEMP_SENSOR);
 }
 
 void draw_screen(void) {
@@ -451,15 +521,14 @@ void draw_screen(void) {
 	ili9488_draw_filled_rectangle(0, 0, ILI9488_LCD_WIDTH-1, ILI9488_LCD_HEIGHT-1);
 }
 
-void draw_button(uint32_t clicked) {
+void draw_button() {
 	static uint32_t last_state = 255; // undefined
 	ili9488_draw_pixmap(0,400,ar.width,ar.height,ar.data);
 	ili9488_draw_pixmap(20,320,termometro.width,termometro.height,termometro.data);
 	ili9488_draw_pixmap(240,0,soneca.width,soneca.height,soneca.data);
 	font_draw_text(&digital52, "00:00", 0, 0, 1);
-	
-	font_draw_text(&digital52, "100%", 120, 400, 1);
-	font_draw_text(&digital52, "32 °C",120, 320, 1);
+	font_draw_text(&digital52, "0%", 120, 400, 1);
+	font_draw_text(&digital52, "0 °C",120, 320, 1);
 
 }
 
@@ -476,16 +545,13 @@ uint32_t convert_axis_system_y(uint32_t touch_x) {
 }
 
 void update_screen(uint32_t temp,uint32_t percentage) {
-	ili9488_draw_filled_rectangle(120,320,240,160);
 	char temps[64];
 	char percents[64];
-	sprintf(&temps,"%2d °C",temp);
-	sprintf(&percents,"%3d %",percentage);
+	sprintf(&temps,"%2d C          ",temp);
+	sprintf(&percents,"%3d %%      ",percentage);
 	font_draw_text(&digital52, percents, 120, 400, 1);
 	font_draw_text(&digital52, temps,120, 320, 1);
 }
-
-
 
 void mxt_handler(struct mxt_device *device, uint *x, uint *y)
 {
@@ -543,47 +609,100 @@ void task_mxt(void){
      vTaskDelay(100);
 	}
 }
-void task_read_temp(void){
+
+void task_read_temp(void) { 
+	xSemaphoreTemp = xSemaphoreCreateBinary();
+	if (xSemaphoreTemp == NULL)
+	{
+		printf("Falha ao criar Semaphore Temp");
+	}
+	
+	int32_t tempr;
+	printf("a criar\n");
+	config_ADC_TEMP();
+	afec_start_software_conversion(AFEC0);
+	printf("criou\n");
+	
 	while (true)
 	{
-		xSemaphoreTemp = xSemaphoreCreateBinary();
-		int32_t tempr;
-		config_ADC_TEMP();		
-		if (xSemaphoreTemp == NULL){
-			printf("falha em criar o semaforo \n");
-		}		
-		for (;;) {
-			if( xSemaphoreTake(xSemaphoreTemp,0)){
-				tempr = convert_adc_to_temp(afec_channel_get_value(AFEC0, AFEC_CHANNEL_TEMP_SENSOR));
-				xQueueSend(xQueueTemp,tempr,0);
-			}
-			vTaskDelay(4000);
+		if( xSemaphoreTake(xSemaphoreTemp,0)){
+			printf("semaphore temp\n");
+			tempr = convert_adc_to_temp(afec_channel_get_value(AFEC0, AFEC_CHANNEL_TEMP_SENSOR));
+			xQueueSend(xQueueTemps,&tempr,0);
 		}
+		vTaskDelay(4000);
 	}
 }
 
-
 void task_lcd(void){
 	xQueueTouch = xQueueCreate( 10, sizeof( touchData ) );
-	xQueueTemp = xQueueCreate( 10, sizeof( int32_t ) );
-	uint32_t temp=0;
-	uint32_t perc=10;
+	xQueueTemps = xQueueCreate( 10, sizeof( uint32_t  ) );
+	xQueuePercs = xQueueCreate( 10, sizeof( uint32_t  ) );
 	configure_lcd();
   
 	draw_screen();
-	draw_button(0);
+	draw_button();
+	touchData touch;
+	uint32_t temperature=0;
+	uint32_t percentage=0;
     
 	while (true) {  
-		if( xQueueReceive( xQueueTemp, &(temp),0))
-		{
-			update_screen(temp,perc);		
+		if (xQueueReceive( xQueueTouch, &(touch), ( TickType_t )  500 / portTICK_PERIOD_MS)) {
+			printf("x:%d y:%d\n", touch.x, touch.y);
+		}    
+		if(xQueueReceive(xQueueTemps, &(temperature), (TickType_t) 500 / portTICK_PERIOD_MS)) {
+			update_screen(temperature,percentage);
+		}
+		if(xQueueReceive(xQueuePercs, &(percentage) , (TickType_t) 500 / portTICK_PERIOD_MS)) {
+			update_screen(temperature,percentage);
 		}
 		
-		vTaskDelay(500);
-  }	 
+	}	 
 }
 
-
+void task_percentage(void){
+	xSemaphoreButUp = xSemaphoreCreateBinary();
+	xSemaphoreButDown = xSemaphoreCreateBinary();
+	uint percentage=0;
+	io_init();
+	
+	/* Configura pino para ser controlado pelo PWM */
+	pmc_enable_periph_clk(ID_PIO_PWM_0);
+	pio_set_peripheral(PIO_PWM_0, PIO_PERIPH_A, MASK_PIN_PWM_0 );
+	
+	/* inicializa PWM com dutycicle 0*/
+	
+	PWM0_init(0, percentage);
+	
+	if (xSemaphoreButDown == NULL)
+	{
+		printf("Falha ao criar Semaphore ButDown");
+		
+	}
+	if (xSemaphoreButUp== NULL)
+	{
+		printf("Falha ao criar Semaphore ButUp");
+	}
+	for (;;) {
+		if( xSemaphoreTake(xSemaphoreButUp, ( TickType_t ) 500) == pdTRUE ){
+			if (percentage<100)
+			{
+				percentage+=10;
+			}
+			pwm_channel_update_duty(PWM0, &g_pwm_channel_led, 100-percentage);
+			xQueueSend(xQueuePercs,&(percentage),NULL);
+		}
+		if( xSemaphoreTake(xSemaphoreButDown, ( TickType_t ) 500) == pdTRUE ){
+			if (percentage>0)
+			{
+				percentage-=10;
+			}
+			pwm_channel_update_duty(PWM0, &g_pwm_channel_led, 100-percentage);
+			xQueueSend(xQueuePercs,&(percentage),NULL);
+		}
+	}
+	
+}
 
 /************************************************************************/
 /* main                                                                 */
@@ -601,13 +720,6 @@ int main(void)
 
 	sysclk_init(); /* Initialize system clocks */
 	board_init();  /* Initialize board */
-	config_ADC_TEMP();
-	pmc_enable_periph_clk(ID_PIO_PWM_0);
-	pio_set_peripheral(PIO_PWM_0, PIO_PERIPH_A, MASK_PIN_PWM_0 );
-	
-	/* inicializa PWM com dutycicle 0*/
-	uint duty = 0;
-	PWM0_init(0, duty);
 	
 	/* Initialize stdio on USART */
 	stdio_serial_init(USART_SERIAL_EXAMPLE, &usart_serial_options);
@@ -619,12 +731,17 @@ int main(void)
   
   /* Create task to handler LCD */
   if (xTaskCreate(task_lcd, "lcd", TASK_LCD_STACK_SIZE, NULL, TASK_LCD_STACK_PRIORITY, NULL) != pdPASS) {
-	  printf("Failed to create test led task\r\n");
+    printf("Failed to create test led task\r\n");
   }
   
-  /* Create task to temperature read */
-  if (xTaskCreate(task_read_temp, "temp", TASK_TEMP_STACK_SIZE, NULL, TASK_TEMP_STACK_PRIORITY, NULL) != pdPASS) {
-	  printf("Failed to create test temp task\r\n");
+  /* Create task to handler AFEC */
+  if (xTaskCreate(task_read_temp, "afec", TASK_AFEC_STACK_SIZE, NULL, TASK_AFEC_STACK_PRIORITY, NULL) != pdPASS) {
+	  printf("Failed to create test afec task\r\n");
+  }
+  
+  /* Create task to handler AFEC */
+  if (xTaskCreate(task_percentage, "percentage", TASK_AFEC_STACK_SIZE, NULL, TASK_AFEC_STACK_PRIORITY, NULL) != pdPASS) {
+	  printf("Failed to create test percentage task\r\n");
   }
 
   /* Start the scheduler. */
