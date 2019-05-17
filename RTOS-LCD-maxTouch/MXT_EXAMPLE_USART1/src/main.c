@@ -102,7 +102,6 @@
 /************************************************************************/
 /* DEFINES                                                              */
 /************************************************************************/
-
 /* Botao 1 OLED */
 #define BUT1_PIO			PIOD
 #define BUT1_PIO_ID			ID_PIOD
@@ -146,7 +145,7 @@ pwm_channel_t g_pwm_channel_led;
 /************************************************************************/
 /* SEMAPHORES                                                           */
 /************************************************************************/
-SemaphoreHandle_t xSemaphoreTemp,xSemaphoreButUp,xSemaphoreButDown;
+SemaphoreHandle_t xSemaphoreButUp,xSemaphoreButDown;
 
 /************************************************************************/
 /* LCD + TOUCH                                                          */
@@ -247,8 +246,6 @@ static void but3_callback(void){
 	BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 	xSemaphoreGiveFromISR(xSemaphoreButUp, &xHigherPriorityTaskWoken);
 }
-
-
 
 /************************************************************************/
 /* init                                                                 */
@@ -538,6 +535,7 @@ uint32_t convert_axis_system_y(uint32_t touch_x) {
 	return ILI9488_LCD_HEIGHT*touch_x/4096;
 }
 
+
 void update_screen(uint32_t temp,uint32_t percentage) {
 	char temps[64];
 	char percents[64];
@@ -545,6 +543,42 @@ void update_screen(uint32_t temp,uint32_t percentage) {
 	sprintf(&percents,"%3d %%      ",percentage);
 	font_draw_text(&digital52, percents, 120, 400, 1);
 	font_draw_text(&digital52, temps,120, 320, 1);
+
+	if(temp > 20){
+		ili9488_set_foreground_color(COLOR_CONVERT(COLOR_YELLOW));
+		ili9488_draw_filled_rectangle(50,100,100,150);
+
+	}
+	else{
+		ili9488_set_foreground_color(COLOR_CONVERT(COLOR_WHITE));
+		ili9488_draw_filled_rectangle(50,100,100,150);
+		
+	}
+	if(temp > 40){
+		ili9488_set_foreground_color(COLOR_CONVERT(COLOR_ORANGE));
+		ili9488_draw_filled_rectangle(100,100,150,150);
+	}
+	else{
+		ili9488_set_foreground_color(COLOR_CONVERT(COLOR_WHITE));
+		ili9488_draw_filled_rectangle(100,100,150,150);
+	}
+	if (temp > 60){
+		ili9488_set_foreground_color(COLOR_CONVERT(COLOR_RED));
+		ili9488_draw_filled_rectangle(150,100,200,150);
+	}
+	else{
+		ili9488_set_foreground_color(COLOR_CONVERT(COLOR_WHITE));
+		ili9488_draw_filled_rectangle(150,100,200,150);
+	}
+	if(temp > 80) {
+		ili9488_set_foreground_color(COLOR_CONVERT(COLOR_BLACK));
+		ili9488_draw_filled_rectangle(200,100,250,150);
+	}
+	else{
+		ili9488_set_foreground_color(COLOR_CONVERT(COLOR_WHITE));
+		ili9488_draw_filled_rectangle(200,100,250,150);
+	}
+	
 }
 
 void mxt_handler(struct mxt_device *device, uint *x, uint *y)
@@ -606,10 +640,6 @@ void task_mxt(void){
 
 void task_read_temp(void) {
 	xQueuePreTemps = xQueueCreate( 10, sizeof( uint32_t  ) );
-	if (xSemaphoreTemp == NULL)
-	{
-		printf("Falha ao criar Semaphore Temp");
-	}
 	
 	uint32_t tempr;
 	config_ADC_TEMP();
@@ -619,7 +649,7 @@ void task_read_temp(void) {
 		afec_start_software_conversion(AFEC0);
 		vTaskDelay(4000);
 		if(  xQueueReceive(xQueuePreTemps , &(tempr) , ( TickType_t ) 500 / portTICK_PERIOD_MS) ){
-			tempr = (afec_channel_get_value(AFEC0, AFEC_CHANNEL_TEMP_SENSOR));
+			//tempr = (afec_channel_get_value(AFEC0, AFEC_CHANNEL_TEMP_SENSOR));
 			tempr = tempr * VOLT_REF / (float) MAX_DIGITAL;
 			tempr = abs(tempr-3200);
 			xQueueSend(xQueueTemps,&tempr,0);
@@ -633,7 +663,6 @@ void task_lcd(void){
 	xQueueTemps = xQueueCreate( 10, sizeof( uint32_t  ) );
 	xQueuePercs = xQueueCreate( 10, sizeof( uint32_t  ) );
 	configure_lcd();
-	
 	draw_screen();
 	draw_button();
 	touchData touch;
@@ -650,8 +679,7 @@ void task_lcd(void){
 		}
 		if(xQueueReceive(xQueuePercs, &(percentage) , (TickType_t) 50 / portTICK_PERIOD_MS)) {
 			update_screen(temperature,percentage);
-		}
-		
+		}	
 	}
 }
 
